@@ -44,7 +44,7 @@ Building Percival from scratch requires [Node v16+](https://nodejs.org/en/),
 build the Rust/WebAssembly portion of the project, use the command:
 
 ```shell
-wasm-pack build --target web crates/percival-wasm
+./build-percival-wasm-with-typescript-types.sh
 ```
 
 Next, run `npm install` to install JavaScript dependencies, then run the
