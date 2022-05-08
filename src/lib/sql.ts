@@ -7,6 +7,62 @@ import type { Rule } from "@/../crates/percival-wasm/pkg/ast/Rule";
 import type { Program } from "percival-wasm/ast/Program";
 import type { Value } from "percival-wasm/ast/Value";
 import { format as formatSql } from "sql-formatter";
+import initSqlJs from "sql.js";
+import sqlJsWasm from "sql.js/dist/sql-wasm.wasm?url";
+import { Relation, type RelationSet } from "./types";
+
+const SQLite = await initSqlJs({
+  locateFile: () => sqlJsWasm,
+});
+
+const DefaultDB = new SQLite.Database();
+
+export function debugExec(compiler: SqlCompiler | undefined): RelationSet {
+  if (compiler === undefined) {
+    return {
+      [`sqlite.warning`]: Relation([{ message: "No SQL" }]),
+    };
+  }
+
+  const program = compiler.compile();
+  const sqlString = program.toString();
+
+  try {
+    const execResult = DefaultDB.exec(sqlString);
+    const result: RelationSet = {};
+    for (
+      let statementIndex = 0;
+      statementIndex < execResult.length;
+      statementIndex++
+    ) {
+      const statementResult = execResult[statementIndex];
+      const indexToColumn = statementResult.columns;
+      const objs = new Array(statementResult.values.length);
+      result[`sqlite.${program.outputs[statementIndex]}`] = objs;
+      for (
+        let rowIndex = 0;
+        rowIndex < statementResult.values.length;
+        rowIndex++
+      ) {
+        const row = statementResult.values[rowIndex];
+        const obj: Record<string, unknown> = {};
+        objs[rowIndex] = obj;
+        for (let colIndex = 0; colIndex < row.length; colIndex++) {
+          obj[indexToColumn[colIndex]] = row[colIndex];
+        }
+      }
+    }
+    return result;
+  } catch (error: any) {
+    return {
+      [`sqlite.error`]: Relation([
+        {
+          message: error.message,
+        },
+      ]),
+    };
+  }
+}
 
 interface SqlTypes {
   raw: { raw: string };
@@ -79,6 +135,14 @@ function op(lhs: Sql, operator: string, rhs: Sql): Sql<"op"> {
   };
 }
 
+function statementList(...statements: Sql[]): Sql<"list"> {
+  return {
+    type: "list",
+    separator: ";\n",
+    terms: statements,
+  };
+}
+
 function tuple(...values: Sql[]): Sql<"tuple"> {
   return {
     type: "tuple",
@@ -108,32 +172,41 @@ function commaSeparated(...terms: Sql[]): Sql<"list"> {
   };
 }
 
-function toString(sql: Sql): string {
+export function sqlToStringPretty(sql: Sql | string): string {
+  return formatSql(typeof sql === "string" ? sql : sqlToString(sql), {
+    indent: "  ",
+    // trying to pick a language that treats `||` as a single infix operator
+    // the default separates these into ` | | ` which is bad
+    language: "plsql",
+  });
+}
+
+export function sqlToString(sql: Sql): string {
   switch (sql.type) {
     case "op":
-      return `${toString(sql.lhs)} ${sql.operator} ${toString(sql.rhs)}`;
+      return `${sqlToString(sql.lhs)} ${sql.operator} ${sqlToString(sql.rhs)}`;
     case "raw":
       return sql.raw;
     case "with":
-      return `WITH RECURSIVE ${sql.bindings.map(toString).join(",\n")}`;
+      return `WITH RECURSIVE ${sql.bindings.map(sqlToString).join(",\n")}`;
     case "binding":
-      return `${sql.name}(${sql.columnNames.join(", ")}) AS (${toString(
+      return `${sql.name}(${sql.columnNames.join(", ")}) AS (${sqlToString(
         sql.as,
       )})`;
     case "list":
-      return sql.terms.map(toString).join(sql.separator ?? "\n");
+      return sql.terms.map(sqlToString).join(sql.separator ?? "\n");
     case "values":
-      return `VALUES ${sql.rows.map(toString).join(", ")}`;
+      return `VALUES ${sql.rows.map(sqlToString).join(", ")}`;
     case "tuple":
-      return `(${sql.values.map(toString).join(", ")})`;
+      return `(${sql.values.map(sqlToString).join(", ")})`;
     case "select":
       const columns = sql.resultColumns
-        .map(({ expr, as }) => `${toString(expr)} AS ${as}`)
+        .map(({ expr, as }) => `${sqlToString(expr)} AS ${as}`)
         .join(", ");
       const parts = [
         `SELECT ${columns}`,
-        sql.from?.terms?.length && `FROM ${toString(sql.from)}`,
-        sql.where?.terms?.length && `WHERE ${toString(sql.where)}`,
+        sql.from?.terms?.length && `FROM ${sqlToString(sql.from)}`,
+        sql.where?.terms?.length && `WHERE ${sqlToString(sql.where)}`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -488,6 +561,11 @@ class SqlCompiler {
   constructor(public readonly program: Program) {}
 
   sql(): string {
+    const comp = this.compile();
+    return comp.toString();
+  }
+
+  compile() {
     const goals = new Map<string, Sql<"binding">>();
     const uniqueTableNames = new Namer<Fact>();
     const rootScope = new Scope<Rule>(undefined);
@@ -565,7 +643,6 @@ class SqlCompiler {
         // Set up projections for each result column.
         // TODO: set up projections for *all* bound IDs
         for (const [column, value] of Object.entries(rule.goal.props)) {
-          console.log(column, value);
           select.resultColumns.push({
             expr: must(
               matchNode(value, {
@@ -642,32 +719,38 @@ class SqlCompiler {
       });
     }
 
-    // SQL can only emit a single thingy...
-    const goalNames = Array.from(goals.keys());
-    const goalName = goalNames[goalNames.length - 1];
-    const goal = goals.get(goalName);
+    type CompileResult = {
+      statements: Sql<"list">;
+      outputs: string[];
+      toString(): string;
+      lastGoalString(): string;
+    };
 
-    if (!goal) {
-      return "(no goals)";
+    const result: CompileResult = {
+      statements: statementList(),
+      outputs: Array.from(goals.keys()),
+      toString: () => sqlToStringPretty(result.statements),
+      lastGoalString: () =>
+        sqlToStringPretty(result.statements.terms.at(-1) ?? ""),
+    };
+
+    for (const [goalName, goal] of goals.entries()) {
+      // We need to emit one statement per goal...
+      // lots of duplication.
+      // todo: temporary table?
+      result.statements.terms.push({
+        type: "list",
+        terms: [
+          {
+            type: "with",
+            bindings: Array.from(goals.values()),
+          },
+          raw(`SELECT * FROM ${goalName}`),
+        ],
+      });
     }
 
-    const source = toString({
-      type: "list",
-      terms: [
-        {
-          type: "with",
-          bindings: Array.from(goals.values()),
-        },
-        raw(`SELECT * FROM ${goalName}`),
-      ],
-    });
-
-    return formatSql(source, {
-      indent: "  ",
-      // trying to pick a language that treats `||` as a single infix operator
-      // the default separates these into ` | | ` which is bad
-      language: "plsql",
-    });
+    return result;
   }
 }
 

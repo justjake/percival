@@ -38,7 +38,10 @@
   >
     {#if state.output !== undefined}
       {#if state.type === "code"}
-        <FullView value={state.output} />
+        <div class="flex flex-row justify-stretch">
+          <FullView value={state.output.js} />
+          <FullView value={state.output.sql} />
+        </div>
       {:else}
         <PlotView name={state.result.results[0]} value={state.output} />
       {/if}

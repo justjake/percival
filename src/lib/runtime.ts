@@ -7,7 +7,12 @@ interface CancellablePromise<T> extends Promise<T> {
   cancel: () => void;
 }
 
-type EvalPromise = CancellablePromise<RelationSet>;
+export type CodeOutput = {
+  js: RelationSet;
+  sql: RelationSet;
+};
+
+type EvalPromise = CancellablePromise<CodeOutput>;
 
 type CompilerResultOk = {
   ok: true;
@@ -28,6 +33,7 @@ export function build(src: string): CompilerResult {
   let result = compile(src);
   if (result.is_ok()) {
     const code = result.js();
+    const ast = result.ast();
     return {
       ok: true,
       evaluate: (deps) => {
@@ -43,7 +49,7 @@ export function build(src: string): CompilerResult {
             reject(new Error(event.message));
             worker.terminate();
           });
-          worker.postMessage({ type: "source", code });
+          worker.postMessage({ type: "source", js: code, ast });
           worker.postMessage({ type: "eval", deps });
         });
         promise.cancel = () => {

@@ -6,7 +6,7 @@
   export let value: RelationSet;
 </script>
 
-<div class="flex flex-col space-y-3">
+<div class="flex flex-col space-y-3 flex-grow min-w-[50%]">
   {#each Object.entries(value) as [name, values] (name)}
     <RelationView {name} {values} />
   {:else}

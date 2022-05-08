@@ -2,6 +2,8 @@ import Immutable from "immutable";
 import { autoType, csvParse, tsvParse } from "d3-dsv";
 import { Relation } from "./types";
 import type { RelationSet } from "./types";
+import type { Program } from "@/../crates/percival-wasm/pkg/ast/Program";
+import type { CodeOutput } from "./runtime";
 
 /** Load data from an external source. */
 async function load(url: string): Promise<Relation> {
@@ -58,21 +60,34 @@ const aggregates: Record<string, (results: any[]) => any> = {
   },
 };
 
+console.log("worker hello");
+
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
-let evaluate: undefined | ((deps: RelationSet) => Promise<RelationSet>);
+let evaluate: undefined | ((deps: RelationSet) => Promise<CodeOutput>);
 
-function initialize(js: string) {
+function initialize(js: string, ast?: Program) {
+  console.log("initialize", js, ast);
   if (evaluate) {
     throw new Error("internal: worker was already initialized");
   }
   const fn = new AsyncFunction("__percival_deps", "__percival", js);
-  evaluate = (deps: RelationSet) => fn(deps, { Immutable, load, aggregates });
+  evaluate = async (deps: RelationSet) => {
+    const js: RelationSet = await fn(deps, { Immutable, load, aggregates });
+    // need to async import this or we miss messages :scream:
+    const { compileToSql, debugExec } = await import("./sql");
+    const sql = ast ? debugExec(compileToSql(ast)) : {};
+    return {
+      js,
+      sql,
+    };
+  };
+  console.log("init", js, ast);
 }
 
 onmessage = (event) => {
   if (event.data.type === "source") {
-    initialize(event.data.code);
+    initialize(event.data.js, event.data.ast);
   } else if (event.data.type === "eval") {
     if (!evaluate) {
       throw new Error("internal: worker was not initialized");

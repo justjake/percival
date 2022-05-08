@@ -29,7 +29,7 @@ export type CodeCellState = CodeCellData & {
   result: CompilerResult;
   status: "stale" | "pending" | "done";
   displayDebug: boolean;
-  output?: RelationSet;
+  output?: { js: RelationSet; sql: RelationSet };
   graphErrors?: string;
   runtimeErrors?: string;
   evaluateHandle?: () => void;
@@ -229,8 +229,8 @@ export class NotebookState {
             prev.graphErrors === undefined &&
             prev.runtimeErrors === undefined
           ) {
-            if (prev.type === "code" && prev.output?.[relation]) {
-              deps[relation] = prev.output[relation];
+            if (prev.type === "code" && prev.output?.js[relation]) {
+              deps[relation] = prev.output.js[relation];
             } else if (prev.type === "plot" && prev.output !== undefined) {
               deps[relation] = prev.output as Relation;
             } else {
