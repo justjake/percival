@@ -114,7 +114,7 @@ function toString(sql: Sql): string {
     case "raw":
       return sql.raw;
     case "with":
-      return `WITH ${sql.bindings.map(toString).join(",\n")}`;
+      return `WITH RECURSIVE ${sql.bindings.map(toString).join(",\n")}`;
     case "binding":
       return `${sql.name}(${sql.columnNames.join(", ")}) AS (${toString(
         sql.as,
@@ -420,6 +420,7 @@ class SqlCompiler {
       return raw(must(notSource));
     };
 
+    // Scan the program for ID bindings to columns or expressions.
     visit(this.program, {
       Rule: (rule) => {
         for (const clause of rule.clauses) {
@@ -459,22 +460,20 @@ class SqlCompiler {
       },
     });
 
-    console.log(idToColumn.edges);
-
     for (const rule of this.program.rules) {
       const term: Sql<"binding"> = goals.get(rule.goal.name) || {
         type: "binding",
         name: rule.goal.name,
         columnNames: Object.keys(rule.goal.props),
-        as: list(),
+        as: {
+          type: "list",
+          separator: "\nUNION\n",
+          terms: [],
+        },
       };
       goals.set(rule.goal.name, term);
 
       if (rule.clauses.length === 0) {
-        if (term.as.terms.length > 0) {
-          term.as.terms.push(raw("UNION"));
-        }
-
         term.as.terms.push({
           type: "values",
           rows: [tuple(...Object.values(rule.goal.props).map(valueToSql))],

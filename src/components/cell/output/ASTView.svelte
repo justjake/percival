@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { CellState } from "@/lib/notebook";
+import { compileToSql } from "@/lib/sql";
   import JSONTree from "svelte-json-tree";
 
   export let state: CellState;
@@ -11,6 +12,9 @@
 {#if state.type === "code" && state.displayDebug && state.result.ok && state.result.ast !== undefined}
   <div class="flex flex-col space-y-3 px-3 py-1">
     <div class="font-mono text-[0.95rem] text-gray-700 json-tree ">
+      <div class="whitespace-pre">
+      {compileToSql(state.result.ast).sql()}
+      </div>
       <div class="float-left inline-flex flex-row mr-4">
         <span class="text-gray-500">AST</span>
         <button
