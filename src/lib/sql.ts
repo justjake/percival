@@ -131,8 +131,8 @@ function toString(sql: Sql): string {
         .join(", ");
       const parts = [
         `SELECT ${columns}`,
-        sql.from && `FROM ${toString(sql.from)}`,
-        sql.where && `WHERE ${toString(sql.where)}`,
+        sql.from?.terms?.length && `FROM ${toString(sql.from)}`,
+        sql.where?.terms?.length && `WHERE ${toString(sql.where)}`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -166,7 +166,7 @@ function valueToSql(value: Value): Sql {
   }
 
   if ("Expr" in value) {
-    return raw(value.Expr);
+    return raw(`(${value.Expr})`);
   }
 
   if ("Aggregate" in value) {
@@ -197,6 +197,8 @@ type PercivalNode =
   | Program
   | Rule
   | Value;
+
+type Binding = { Binding: [string, Value] };
 
 interface RegularNodes {
   Aggregate: { Aggregate: Aggregate };
@@ -380,13 +382,43 @@ class Namer<K> {
   }
 }
 
+type Bound = `expr:${string}` | `column:${string}`;
+
 class SqlCompiler {
   constructor(public readonly program: Program) {}
 
   sql(): string {
     const goals = new Map<string, Sql<"binding">>();
     const idToColumn = new DAG<string, string>();
+    const idToBinding = new Map<string, Value>();
+    const isSourceColumn = new Set<string>();
     const uniqueTableNames = new Namer<Fact>();
+
+    // TODO: scopes.
+    const resolveId = (id: string): Sql => {
+      const binding = idToBinding.get(id);
+      if (binding) {
+        console.log("resolve binding", binding);
+        return must(
+          matchNode(binding, {
+            Id(node) {
+              return resolveId(node.Id);
+            },
+            Literal: valueToSql,
+            Expr: valueToSql,
+            Aggregate(node) {
+              return raw(`TODO(Aggregate(${JSON.stringify(node.Aggregate)}))`);
+            },
+          }),
+        );
+      }
+      const columns = must(Array.from(idToColumn.edges.get(id) ?? []));
+      const notSource = columns.find((column) => !isSourceColumn.has(column));
+      if (notSource === undefined) {
+        return raw(`TODO(resolveId(${id}))`);
+      }
+      return raw(must(notSource));
+    };
 
     visit(this.program, {
       Rule: (rule) => {
@@ -407,6 +439,20 @@ class SqlCompiler {
                   idToColumn.add(id, `${uniqueName}.${column}`);
                 }
               }
+            },
+            Binding: (binding) => {
+              const [id, value] = binding.Binding;
+              if (idToBinding.has(id)) {
+                throw new Error(`Duplicate binding: ${id}`);
+              }
+              if (
+                matchNode(value, {
+                  Id: (node) => node.Id === id,
+                })
+              ) {
+                throw new Error(`Binding to itself: ${id}`);
+              }
+              idToBinding.set(id, value);
             },
           });
         }
@@ -442,19 +488,16 @@ class SqlCompiler {
       };
       term.as.terms.push(select);
 
-      const bound = new Set<string>();
       for (const [column, value] of Object.entries(rule.goal.props)) {
         console.log(column, value);
         select.resultColumns.push({
           expr: must(
             matchNode(value, {
               Id(node) {
-                // TODO: get first unbound?
-                const sourceTableColumn = must(
-                  Array.from(idToColumn.edges.get(node.Id) ?? [])[0],
-                );
-                bound.add(sourceTableColumn);
-                return raw(sourceTableColumn);
+                const sourceTableColumn = resolveId(node.Id);
+                // XXX hacky
+                isSourceColumn.add(toString(sourceTableColumn));
+                return sourceTableColumn;
               },
               Literal: valueToSql,
               Expr: valueToSql,
@@ -515,9 +558,11 @@ class SqlCompiler {
               });
             }
           },
-          Expr: valueToSql,
+          Expr(expr) {
+            where.terms.push(valueToSql(expr));
+          },
           Binding({ Binding }) {
-            return raw(`TODO(${Binding[0]} = ${valueToSql(Binding[1])})`);
+            // Handled elsewhere.
           },
         }),
       );
