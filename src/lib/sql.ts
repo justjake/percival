@@ -110,9 +110,9 @@ type Sql<T extends keyof SqlTypes = keyof SqlTypes> = {
   [Type in keyof SqlTypes]: SqlTypes[Type] & { type: Type };
 }[T];
 
-function must<T>(val: T | undefined): T {
+function must<T>(message: string, val: T | undefined): T {
   if (val === undefined) {
-    throw new Error("must not be undefined");
+    throw new Error(`must not be undefined: ${message}`);
   }
   return val;
 }
@@ -469,7 +469,10 @@ class Namer<K> {
   }
 
   originalTableName(uniqueName: string): string {
-    return must(this.uniqueNameToTable.get(uniqueName));
+    return must(
+      `have named table ${uniqueName}`,
+      this.uniqueNameToTable.get(uniqueName),
+    );
   }
 }
 
@@ -479,6 +482,7 @@ class Scope<K> {
   bindings = new Map<string, Value | TableColumn>();
   relatedColumns = new DAG<string, TableColumn>();
   children = new Map<K, Scope<K>>();
+  uniqueTableNames = new Namer<Fact>();
 
   bind(id: string, binding: Value | TableColumn) {
     if (this.has(id)) {
@@ -508,6 +512,7 @@ class Scope<K> {
     }
 
     return must(
+      `resolve bound id ${id}`,
       matchNode(binding, {
         Id: (node) => {
           return this.resolve(node.Id, term);
@@ -567,7 +572,6 @@ class SqlCompiler {
 
   compile() {
     const goals = new Map<string, Sql<"binding">>();
-    const uniqueTableNames = new Namer<Fact>();
     const rootScope = new Scope<Rule>(undefined);
 
     {
@@ -583,10 +587,11 @@ class SqlCompiler {
               matchNode(clause, {
                 Fact: (fact) => {
                   const { name, props } = fact.Fact;
-                  const uniqueName = uniqueTableNames.uniqueTableName(
-                    fact.Fact,
-                    name,
-                  );
+                  const uniqueName =
+                    currentScope.uniqueTableNames.uniqueTableName(
+                      fact.Fact,
+                      name,
+                    );
 
                   for (const [column, value] of Object.entries(props)) {
                     const id = matchNode(value, {
@@ -614,7 +619,10 @@ class SqlCompiler {
         },
         {
           Rule: () => {
-            currentScope = must(currentScope.parent) as Scope<Rule>;
+            currentScope = must(
+              `restore scope`,
+              currentScope.parent,
+            ) as Scope<Rule>;
           },
         },
       );
@@ -640,17 +648,20 @@ class SqlCompiler {
         };
         term.as.terms.push(select);
 
-        // Set up projections for each result column.
-        // TODO: set up projections for *all* bound IDs
+        // Set up projections for each result column
+        const projected = new Set<string>();
         for (const [column, value] of Object.entries(rule.goal.props)) {
           select.resultColumns.push({
             expr: must(
+              `project result column ${column}`,
               matchNode(value, {
                 Id(node) {
+                  projected.add(node.Id);
                   return currentScope.resolve(node.Id, "column");
                 },
                 Literal: valueToSql,
                 Expr: valueToSql,
+                Aggregate: valueToSql,
               }),
             ),
             as: column,
@@ -664,7 +675,8 @@ class SqlCompiler {
         );
         select.from = commaSeparated(
           ...Array.from(tables).map((uniqueName) => {
-            const originalName = uniqueTableNames.originalTableName(uniqueName);
+            const originalName =
+              currentScope.uniqueTableNames.originalTableName(uniqueName);
             if (originalName === uniqueName) {
               return raw(originalName);
             }
@@ -685,7 +697,10 @@ class SqlCompiler {
           matchNode(clause, {
             Fact({ Fact }) {
               const { name, props } = Fact;
-              const uniqueName = uniqueTableNames.uniqueTableName(Fact, name);
+              const uniqueName = currentScope.uniqueTableNames.uniqueTableName(
+                Fact,
+                name,
+              );
               for (const [column, value] of Object.entries(props)) {
                 const addEqConstraint = (node: Value) => {
                   where.terms.push(

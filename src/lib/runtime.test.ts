@@ -26,7 +26,7 @@ async function checkProgram({
   expect(result.results).to.have.members(results);
   const observed = await result.evaluate(input);
   for (const key of Object.keys(output)) {
-    expect(observed[key]).to.have.deep.members(output[key]);
+    expect(observed.js[key]).to.have.deep.members(output[key]);
   }
 }
 
@@ -42,7 +42,7 @@ describe("basic compilation", () => {
     const result = build("tc(x: 3).");
     expect(result.ok).to.be.true;
     if (!result.ok) throw null; // unreachable
-    expect(await result.evaluate({})).to.deep.equal({
+    expect((await result.evaluate({})).js).to.deep.equal({
       tc: [{ x: 3 }],
     });
   });

@@ -8,6 +8,24 @@ function check(data: CellData[]) {
   expect(newData).to.deep.equal(data);
 }
 
+describe("unmarshal", () => {
+  it("can decode a cell on the first line", () => {
+    const text = `╔═╡ Code
+edge(x: 1, y: 2).
+edge(x: 2, y: 3).
+edge(x: 2, y: 4).
+`;
+    const newData = unmarshal(text);
+    expect(newData).to.deep.equal([
+      {
+        type: "code",
+        value: text.split("\n").slice(1).join("\n").trimEnd(),
+        hidden: false,
+      },
+    ]);
+  });
+});
+
 describe("marshal function", () => {
   it("encodes empty data", () => {
     check([]);

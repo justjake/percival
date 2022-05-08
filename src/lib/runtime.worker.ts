@@ -60,14 +60,11 @@ const aggregates: Record<string, (results: any[]) => any> = {
   },
 };
 
-console.log("worker hello");
-
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 let evaluate: undefined | ((deps: RelationSet) => Promise<CodeOutput>);
 
 function initialize(js: string, ast?: Program) {
-  console.log("initialize", js, ast);
   if (evaluate) {
     throw new Error("internal: worker was already initialized");
   }
@@ -82,7 +79,6 @@ function initialize(js: string, ast?: Program) {
       sql,
     };
   };
-  console.log("init", js, ast);
 }
 
 onmessage = (event) => {
