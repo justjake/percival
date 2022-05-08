@@ -4,7 +4,7 @@
   import { NotebookState } from "@/lib/notebook";
   import { createNotebookStore } from "@/lib/stores";
   import { marshal, unmarshal } from "@/lib/marshal";
-  import starter from "@/samples/starter.percival?raw";
+  import starter from "@/samples/focus.percival?raw";
   import Header from "./Header.svelte";
   import Notebook from "./Notebook.svelte";
 

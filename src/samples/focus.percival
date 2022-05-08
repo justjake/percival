@@ -1,0 +1,21 @@
+
+╔═╡ Code
+// Edge relation: each line is a database entry.
+edge(x: 1, y: 2).
+edge(x: 2, y: 3).
+edge(x: 2, y: 4).
+// Given an edge x -> y, there is a path x -> y.
+path(x, y) :- edge(x, y).
+// Given an edge x -> z and a path z -> y, there is a path x -> y.
+path(x, y) :- edge(x, y: z), path(x: z, y).
+
+╔═╡ Code
+walk(x: v, y: v, len: 0) :- edge(x: v).
+walk(x: v, y: v, len: 0) :- edge(y: v).
+
+// What happens to the output of this rule if we add a cycle to the graph?
+walk(x, y, len) :-
+  walk(x, y: z, len: len1),
+  edge(x: z, y),
+  len = `len1 + 1`,
+  `len <= 10`.

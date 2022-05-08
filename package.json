@@ -34,6 +34,7 @@
     "remark-math": "^5.1.1",
     "remark-parse": "^10.0.1",
     "remark-rehype": "^10.1.0",
+    "sql-formatter": "^4.0.2",
     "svelte": "^3.46.6",
     "svelte-icons": "^2.1.0",
     "svelte-json-tree": "^1.0.0",

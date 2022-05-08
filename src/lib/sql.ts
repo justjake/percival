@@ -6,6 +6,7 @@ import type { Literal } from "@/../crates/percival-wasm/pkg/ast/Literal";
 import type { Rule } from "@/../crates/percival-wasm/pkg/ast/Rule";
 import type { Program } from "percival-wasm/ast/Program";
 import type { Value } from "percival-wasm/ast/Value";
+import { format as formatSql } from "sql-formatter";
 
 interface SqlTypes {
   raw: { raw: string };
@@ -166,7 +167,7 @@ function valueToSql(value: Value): Sql {
   }
 
   if ("Expr" in value) {
-    return raw(`(${value.Expr})`);
+    return raw(`(${jsToSql(value.Expr)})`);
   }
 
   if ("Aggregate" in value) {
@@ -176,6 +177,19 @@ function valueToSql(value: Value): Sql {
   }
 
   unreachable(value);
+}
+
+const dottedPath = /([a-zA-Z]\w*\.)+([a-zA-Z]\w*)/g;
+
+// Super janky, just to make things easier to test.
+function jsToSql(js: string): string {
+  let result = js;
+  result = result.replaceAll("+", "||");
+  result = result.replaceAll(
+    dottedPath,
+    (match) => match.split(".").at(-1) || match,
+  );
+  return result;
 }
 
 class DAG<From, To> {
@@ -245,9 +259,21 @@ type Visitors<N, R> = {
 
 function visit(
   root: PercivalNode,
-  visitors: Partial<NodeVisitors<void>>,
+  preOrder: Partial<NodeVisitors<void>>,
+  postOrder?: Partial<NodeVisitors<void>>,
 ): void {
-  const visitSelf = (self: PercivalNode) => matchNode(self, visitors);
+  const visitNode = (
+    self: PercivalNode,
+    children?: Array<PercivalNode | PercivalNode[]>,
+  ) => {
+    matchNode(self, preOrder);
+    if (children) {
+      children.forEach(recurseChildren);
+    }
+    if (postOrder) {
+      matchNode(self, postOrder);
+    }
+  };
   const recurseChildren = (array: PercivalNode | PercivalNode[]): void => {
     Array.isArray(array)
       ? array.map((node) => matchNode(node, recurse))
@@ -256,35 +282,27 @@ function visit(
 
   const recurse: Required<NodeVisitors<void>> = {
     Aggregate(node) {
-      visitSelf(node);
-      recurseChildren(node.Aggregate.value);
-      recurseChildren(node.Aggregate.subquery);
+      visitNode(node, [node.Aggregate.value, node.Aggregate.subquery]);
     },
     Fact(node) {
-      visitSelf(node);
-      recurseChildren(Object.values(node.Fact.props));
+      visitNode(node, Object.values(node.Fact.props));
     },
-    Import: visitSelf,
+    Import: visitNode,
     Program: function (node: Program): void {
-      visitSelf(node);
-      recurseChildren(node.imports);
-      recurseChildren(node.rules);
+      visitNode(node, [node.imports, node.rules]);
     },
     Rule: function (node: Rule): void {
-      visitSelf(node);
-      recurseChildren(node.goal);
-      recurseChildren(node.clauses);
+      visitNode(node, [node.goal, node.clauses]);
     },
-    Expr: visitSelf,
+    Expr: visitNode,
     Binding: function (node: { Binding: [string, Value] }): void {
-      visitSelf(node);
-      recurseChildren(node.Binding[1]);
+      visitNode(node, [node.Binding[1]]);
     },
-    Number: visitSelf,
-    String: visitSelf,
-    Boolean: visitSelf,
-    Id: visitSelf,
-    Literal: visitSelf,
+    Number: visitNode,
+    String: visitNode,
+    Boolean: visitNode,
+    Id: visitNode,
+    Literal: visitNode,
   };
 
   return matchNode(root, recurse);
@@ -382,189 +400,246 @@ class Namer<K> {
   }
 }
 
-type Bound = `expr:${string}` | `column:${string}`;
+type TableColumn = `${string}.${string}`;
+class Scope<K> {
+  constructor(public parent: Scope<unknown> | undefined) {}
+  bindings = new Map<string, Value | TableColumn>();
+  relatedColumns = new DAG<string, TableColumn>();
+  children = new Map<K, Scope<K>>();
+
+  bind(id: string, binding: Value | TableColumn) {
+    if (this.has(id)) {
+      throw new Error(`Duplicate binding for ${id}`);
+    }
+
+    this.bindings.set(id, binding);
+    // TODO: is this correct? Or should we manage related columns with separate
+    // scoping?
+    if (typeof binding === "string") {
+      this.relatedColumns.add(id, binding);
+    }
+  }
+
+  resolve(id: string, term: "column" | "body" = "body"): Sql {
+    const scope = this.scope(id);
+    if (!scope) {
+      // throw new Error(`No binding for ${id} in any scope`);
+      return raw(`TODO('Not bound in any scope: ${id}')`);
+    }
+    const binding = scope.bindings.get(id);
+    if (!binding) {
+      throw new Error(`Missing binding for ${id}`);
+    }
+    if (typeof binding === "string") {
+      return term === "column" ? raw(binding) : raw(id);
+    }
+
+    return must(
+      matchNode(binding, {
+        Id: (node) => {
+          return this.resolve(node.Id, term);
+        },
+        Literal: valueToSql,
+        Expr: valueToSql,
+        Aggregate(node) {
+          return raw(
+            `TODO('Resolve id bound to aggregate: ${JSON.stringify(node)}')`,
+          );
+        },
+      }),
+    );
+  }
+
+  relate(id: string, column: TableColumn) {
+    const scope = this.scope(id);
+    // TODO: is this correct? Or should we manage related columns with separate
+    // scoping?
+    if (scope) {
+      scope.relatedColumns.add(id, column);
+    } else {
+      this.bind(id, column);
+    }
+  }
+
+  scope(id: string): Scope<unknown> | undefined {
+    if (this.bindings.has(id)) {
+      return this;
+    }
+
+    return this.parent?.scope(id);
+  }
+
+  has(id: string): boolean {
+    return Boolean(this.bindings.has(id) || this.parent?.has(id));
+  }
+
+  childScope(key: K): Scope<K> {
+    const child = this.children.get(key) || new Scope(this);
+    this.children.set(key, child);
+    return child;
+  }
+
+  enter<R>(key: K, fn: (scope: Scope<K>) => R): R {
+    return fn(this.childScope(key));
+  }
+}
 
 class SqlCompiler {
   constructor(public readonly program: Program) {}
 
   sql(): string {
     const goals = new Map<string, Sql<"binding">>();
-    const idToColumn = new DAG<string, string>();
-    const idToBinding = new Map<string, Value>();
-    const isSourceColumn = new Set<string>();
     const uniqueTableNames = new Namer<Fact>();
+    const rootScope = new Scope<Rule>(undefined);
 
-    // TODO: scopes.
-    const resolveId = (id: string): Sql => {
-      const binding = idToBinding.get(id);
-      if (binding) {
-        console.log("resolve binding", binding);
-        return must(
-          matchNode(binding, {
-            Id(node) {
-              return resolveId(node.Id);
-            },
-            Literal: valueToSql,
-            Expr: valueToSql,
-            Aggregate(node) {
-              return raw(`TODO(Aggregate(${JSON.stringify(node.Aggregate)}))`);
-            },
-          }),
-        );
-      }
-      const columns = must(Array.from(idToColumn.edges.get(id) ?? []));
-      const notSource = columns.find((column) => !isSourceColumn.has(column));
-      if (notSource === undefined) {
-        return raw(`TODO(resolveId(${id}))`);
-      }
-      return raw(must(notSource));
-    };
+    {
+      let currentScope = rootScope;
 
-    // Scan the program for ID bindings to columns or expressions.
-    visit(this.program, {
-      Rule: (rule) => {
-        for (const clause of rule.clauses) {
-          matchNode(clause, {
-            Fact: (fact) => {
-              const { name, props } = fact.Fact;
-              const uniqueName = uniqueTableNames.uniqueTableName(
-                fact.Fact,
-                name,
-              );
+      // Scan the program for ID bindings to columns or expressions.
+      visit(
+        this.program,
+        {
+          Rule: (rule) => {
+            currentScope = currentScope.childScope(rule);
+            for (const clause of rule.clauses) {
+              matchNode(clause, {
+                Fact: (fact) => {
+                  const { name, props } = fact.Fact;
+                  const uniqueName = uniqueTableNames.uniqueTableName(
+                    fact.Fact,
+                    name,
+                  );
 
-              for (const [column, value] of Object.entries(props)) {
-                const id = matchNode(value, {
-                  Id: (id) => id.Id,
-                });
-                if (id) {
-                  idToColumn.add(id, `${uniqueName}.${column}`);
-                }
-              }
-            },
-            Binding: (binding) => {
-              const [id, value] = binding.Binding;
-              if (idToBinding.has(id)) {
-                throw new Error(`Duplicate binding: ${id}`);
-              }
-              if (
-                matchNode(value, {
-                  Id: (node) => node.Id === id,
-                })
-              ) {
-                throw new Error(`Binding to itself: ${id}`);
-              }
-              idToBinding.set(id, value);
-            },
-          });
-        }
-      },
-    });
-
-    for (const rule of this.program.rules) {
-      const term: Sql<"binding"> = goals.get(rule.goal.name) || {
-        type: "binding",
-        name: rule.goal.name,
-        columnNames: Object.keys(rule.goal.props),
-        as: {
-          type: "list",
-          separator: "\nUNION\n",
-          terms: [],
-        },
-      };
-      goals.set(rule.goal.name, term);
-
-      if (rule.clauses.length === 0) {
-        term.as.terms.push({
-          type: "values",
-          rows: [tuple(...Object.values(rule.goal.props).map(valueToSql))],
-        });
-        continue;
-      }
-
-      const select: Sql<"select"> = {
-        type: "select",
-        resultColumns: [],
-      };
-      term.as.terms.push(select);
-
-      for (const [column, value] of Object.entries(rule.goal.props)) {
-        console.log(column, value);
-        select.resultColumns.push({
-          expr: must(
-            matchNode(value, {
-              Id(node) {
-                const sourceTableColumn = resolveId(node.Id);
-                // XXX hacky
-                isSourceColumn.add(toString(sourceTableColumn));
-                return sourceTableColumn;
-              },
-              Literal: valueToSql,
-              Expr: valueToSql,
-            }),
-          ),
-          as: column,
-        });
-      }
-
-      const tables = new Set(
-        Array.from(idToColumn.edges.values())
-          .flatMap((edges) => Array.from(edges))
-          .map((col) => col.split(".")[0]),
-      );
-      select.from = commaSeparated(
-        ...Array.from(tables).map((uniqueName) =>
-          raw(
-            `${uniqueTableNames.originalTableName(
-              uniqueName,
-            )} AS ${uniqueName}`,
-          ),
-        ),
-      );
-
-      // Constraints... the hard part
-      const where: Sql<"list"> = {
-        type: "list",
-        separator: " AND ",
-        terms: [],
-      };
-      select.where = where;
-
-      const joins = new DAG</* id */ string, /* column */ string>();
-      rule.clauses.forEach((clause) =>
-        matchNode(clause, {
-          Fact({ Fact }) {
-            const { name, props } = Fact;
-            const uniqueName = uniqueTableNames.uniqueTableName(Fact, name);
-            for (const [column, value] of Object.entries(props)) {
-              const addEqConstraint = (node: Value) => {
-                where.terms.push(
-                  op(raw(`${uniqueName}.${column}`), "=", valueToSql(node)),
-                );
-              };
-              matchNode(value, {
-                Literal: addEqConstraint,
-                Expr: addEqConstraint,
-                Id(node) {
-                  joins.add(node.Id, `${uniqueName}.${column}`);
-                  const [left, right] = Array.from(
-                    joins.edges.get(node.Id) ?? [],
-                  ).slice(-2);
-                  if (left && right) {
-                    // Join!
-                    where.terms.push(op(raw(left), "=", raw(right)));
+                  for (const [column, value] of Object.entries(props)) {
+                    const id = matchNode(value, {
+                      Id: (id) => id.Id,
+                    });
+                    if (id) {
+                      currentScope.relate(id, `${uniqueName}.${column}`);
+                    }
                   }
+                },
+                Binding: (binding) => {
+                  const [id, value] = binding.Binding;
+                  if (
+                    matchNode(value, {
+                      Id: (node) => node.Id === id,
+                    })
+                  ) {
+                    throw new Error(`Binding to itself: ${id}`);
+                  }
+                  currentScope.bind(id, value);
                 },
               });
             }
           },
-          Expr(expr) {
-            where.terms.push(valueToSql(expr));
+        },
+        {
+          Rule: () => {
+            currentScope = must(currentScope.parent) as Scope<Rule>;
           },
-          Binding({ Binding }) {
-            // Handled elsewhere.
-          },
-        }),
+        },
       );
+    }
+
+    for (const rule of this.program.rules) {
+      rootScope.enter(rule, (currentScope) => {
+        const term: Sql<"binding"> = goals.get(rule.goal.name) || {
+          type: "binding",
+          name: rule.goal.name,
+          columnNames: Object.keys(rule.goal.props),
+          as: {
+            type: "list",
+            separator: "\nUNION\n",
+            terms: [],
+          },
+        };
+        goals.set(rule.goal.name, term);
+
+        const select: Sql<"select"> = {
+          type: "select",
+          resultColumns: [],
+        };
+        term.as.terms.push(select);
+
+        // Set up projections for each result column.
+        // TODO: set up projections for *all* bound IDs
+        for (const [column, value] of Object.entries(rule.goal.props)) {
+          console.log(column, value);
+          select.resultColumns.push({
+            expr: must(
+              matchNode(value, {
+                Id(node) {
+                  return currentScope.resolve(node.Id, "column");
+                },
+                Literal: valueToSql,
+                Expr: valueToSql,
+              }),
+            ),
+            as: column,
+          });
+        }
+
+        const tables = new Set(
+          Array.from(currentScope.relatedColumns.edges.values())
+            .flatMap((edges) => Array.from(edges))
+            .map((col) => col.split(".")[0]),
+        );
+        select.from = commaSeparated(
+          ...Array.from(tables).map((uniqueName) => {
+            const originalName = uniqueTableNames.originalTableName(uniqueName);
+            if (originalName === uniqueName) {
+              return raw(originalName);
+            }
+            return raw(`${originalName} AS ${uniqueName}`);
+          }),
+        );
+
+        // Constraints... the hard part
+        const where: Sql<"list"> = {
+          type: "list",
+          separator: " AND ",
+          terms: [],
+        };
+        select.where = where;
+
+        const joins = new DAG</* id */ string, /* column */ string>();
+        rule.clauses.forEach((clause) =>
+          matchNode(clause, {
+            Fact({ Fact }) {
+              const { name, props } = Fact;
+              const uniqueName = uniqueTableNames.uniqueTableName(Fact, name);
+              for (const [column, value] of Object.entries(props)) {
+                const addEqConstraint = (node: Value) => {
+                  where.terms.push(
+                    op(raw(`${uniqueName}.${column}`), "=", valueToSql(node)),
+                  );
+                };
+                matchNode(value, {
+                  Literal: addEqConstraint,
+                  Expr: addEqConstraint,
+                  Id(node) {
+                    joins.add(node.Id, `${uniqueName}.${column}`);
+                    const [left, right] = Array.from(
+                      joins.edges.get(node.Id) ?? [],
+                    ).slice(-2);
+                    if (left && right) {
+                      // Join!
+                      where.terms.push(op(raw(left), "=", raw(right)));
+                    }
+                  },
+                });
+              }
+            },
+            Expr(expr) {
+              where.terms.push(valueToSql(expr));
+            },
+            Binding({ Binding }) {
+              // Handled elsewhere.
+            },
+          }),
+        );
+      });
     }
 
     // SQL can only emit a single thingy...
@@ -576,7 +651,7 @@ class SqlCompiler {
       return "(no goals)";
     }
 
-    return toString({
+    const source = toString({
       type: "list",
       terms: [
         {
@@ -585,6 +660,13 @@ class SqlCompiler {
         },
         raw(`SELECT * FROM ${goalName}`),
       ],
+    });
+
+    return formatSql(source, {
+      indent: "  ",
+      // trying to pick a language that treats `||` as a single infix operator
+      // the default separates these into ` | | ` which is bad
+      language: "plsql",
     });
   }
 }
