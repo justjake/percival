@@ -93,7 +93,7 @@ interface SqlTypes {
   select: {
     resultColumns: Array<{
       expr: Sql;
-      as: string;
+      as?: string;
     }>;
     from?: Sql<"list">;
     where?: Sql<"list">;
@@ -103,6 +103,11 @@ interface SqlTypes {
     operator: string;
     lhs: Sql;
     rhs: Sql;
+  };
+
+  tableAlias: {
+    expr: Sql;
+    as: string;
   };
 }
 
@@ -116,11 +121,6 @@ function must<T>(message: string, val: T | undefined): T {
   }
   return val;
 }
-
-const NOTHING: Sql<"raw"> = {
-  type: "raw",
-  raw: "",
-};
 
 function unreachable(val: never): never {
   throw new Error("unreachable");
@@ -172,6 +172,10 @@ function commaSeparated(...terms: Sql[]): Sql<"list"> {
   };
 }
 
+function todo(message: string, fallback: Sql): Sql<"raw"> {
+  return raw(`/* TODO: ${message} */${sqlToString(fallback)}`);
+}
+
 export function sqlToStringPretty(sql: Sql | string): string {
   return formatSql(typeof sql === "string" ? sql : sqlToString(sql), {
     indent: "  ",
@@ -181,7 +185,11 @@ export function sqlToStringPretty(sql: Sql | string): string {
   });
 }
 
-export function sqlToString(sql: Sql): string {
+export function sqlToString(sql: Sql | string): string {
+  if (typeof sql === "string") {
+    return sql;
+  }
+
   switch (sql.type) {
     case "op":
       return `${sqlToString(sql.lhs)} ${sql.operator} ${sqlToString(sql.rhs)}`;
@@ -199,9 +207,13 @@ export function sqlToString(sql: Sql): string {
       return `VALUES ${sql.rows.map(sqlToString).join(", ")}`;
     case "tuple":
       return `(${sql.values.map(sqlToString).join(", ")})`;
+    case "tableAlias":
+      return `(${sqlToString(sql.expr)}) AS ${sql.as}`;
     case "select":
       const columns = sql.resultColumns
-        .map(({ expr, as }) => `${sqlToString(expr)} AS ${as}`)
+        .map(({ expr, as: asAlias }) =>
+          asAlias ? `${sqlToString(expr)} AS ${asAlias}` : sqlToString(expr),
+        )
         .join(", ");
       const parts = [
         `SELECT ${columns}`,
@@ -229,7 +241,7 @@ function valueToSql(value: Value): Sql {
     if ("String" in value.Literal) {
       // TODO: quoting
       const quoted = value.Literal.String.replace(/'/g, "''");
-      return raw(`'${quoted}'`);
+      return todo(`Correct quote escaping`, raw(`'${quoted}'`));
     }
 
     if ("Boolean" in value.Literal) {
@@ -245,8 +257,7 @@ function valueToSql(value: Value): Sql {
 
   if ("Aggregate" in value) {
     // TODO: aggregate
-    return raw(`AGGREGATE(${JSON.stringify(value.Aggregate)})`);
-    // unreachable(value.Aggregate);
+    return todo(`AGGREGATE ${JSON.stringify(value.Aggregate)}`, raw(`0`));
   }
 
   unreachable(value);
@@ -501,7 +512,7 @@ class Scope<K> {
     const scope = this.scope(id);
     if (!scope) {
       // throw new Error(`No binding for ${id} in any scope`);
-      return raw(`TODO('Not bound in any scope: ${id}')`);
+      return todo(`Not bound in any scope: ${id}`, raw(`unbound_id_${id}`));
     }
     const binding = scope.bindings.get(id);
     if (!binding) {
@@ -520,9 +531,7 @@ class Scope<K> {
         Literal: valueToSql,
         Expr: valueToSql,
         Aggregate(node) {
-          return raw(
-            `TODO('Resolve id bound to aggregate: ${JSON.stringify(node)}')`,
-          );
+          return todo(`Id bound to aggregate: ${id}`, valueToSql(node));
         },
       }),
     );
@@ -577,7 +586,8 @@ class SqlCompiler {
     {
       let currentScope = rootScope;
 
-      // Scan the program for ID bindings to columns or expressions.
+      // Scan the program for ID bindings to columns or expressions,
+      // and record those bindings into the scope.
       visit(
         this.program,
         {
