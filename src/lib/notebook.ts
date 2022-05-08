@@ -99,7 +99,7 @@ export class NotebookState {
         ...cell,
         result: build(cell.value),
         status: "stale",
-        displayDebug: false,
+        displayDebug: true,
       });
     } else {
       this.cells.set(id, {

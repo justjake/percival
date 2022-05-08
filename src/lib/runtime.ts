@@ -1,4 +1,5 @@
 import { compile } from "percival-wasm";
+import type { Program } from "percival-wasm/ast/Program";
 import Worker from "./runtime.worker?worker&inline";
 import type { RelationSet } from "./types";
 
@@ -13,7 +14,7 @@ type CompilerResultOk = {
   evaluate: (deps: RelationSet) => EvalPromise;
   deps: string[];
   results: string[];
-  ast: object | undefined;
+  ast: Program | undefined;
 };
 
 type CompilerResultErr = {
