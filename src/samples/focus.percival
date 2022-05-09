@@ -1,15 +1,8 @@
-
 ╔═╡ Code
-edge(x: 1, y: 2).
-edge(x: 2, y: 3).
-edge(x: 2, y: 4).
+name(full_name: `first + " " + last`, sqrt_age) :-
+  person(first, last, age),
+  sqrt_age = `Math.sqrt(age)`.
 
-walk(x: v, y: v, len: 0) :- edge(x: v).
-walk(x: v, y: v, len: 0) :- edge(y: v).
-
-// What happens to the output of this rule if we add a cycle to the graph?
-walk(x, y, len) :-
-  walk(x, y: z, len: len1),
-  edge(x: z, y),
-  len = `len1 + 1`,
-  `len <= 10`.
+person(first: "Alice", last: "Carol", age: 20).
+person(first: "Foo", last: "Bar", age: 45).
+person(first: "Baz", last: "Lam", age: 12).

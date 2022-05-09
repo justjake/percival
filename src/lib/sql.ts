@@ -10,12 +10,19 @@ import { format as formatSql } from "sql-formatter";
 import initSqlJs from "sql.js";
 import sqlJsWasm from "sql.js/dist/sql-wasm.wasm?url";
 import { Relation, type RelationSet } from "./types";
+import { javascript } from "@codemirror/lang-javascript";
 
 const SQLite = await initSqlJs({
   locateFile: () => sqlJsWasm,
 });
 
 const DefaultDB = new SQLite.Database();
+
+function parseJs(js: string) {
+  const { language } = javascript();
+  const parser = language.parser;
+  return parser.parse(js);
+}
 
 export function debugExec(compiler: SqlCompiler | undefined): RelationSet {
   if (compiler === undefined) {
@@ -228,7 +235,7 @@ export function sqlToString(sql: Sql | string): string {
   }
 }
 
-function valueToSql(value: Value): Sql {
+function valueToSqlWithScope(value: Value, scope: Scope<unknown>): Sql {
   if ("Id" in value) {
     return raw(value.Id);
   }
@@ -252,7 +259,7 @@ function valueToSql(value: Value): Sql {
   }
 
   if ("Expr" in value) {
-    return raw(`(${jsToSql(value.Expr)})`);
+    return raw(`(${jsToSql(value.Expr, scope)})`);
   }
 
   if ("Aggregate" in value) {
@@ -263,16 +270,134 @@ function valueToSql(value: Value): Sql {
   unreachable(value);
 }
 
-const dottedPath = /([a-zA-Z]\w*\.)+([a-zA-Z]\w*)/g;
+const mathFunction = /^Math\.\w*/g;
 
-// Super janky, just to make things easier to test.
-function jsToSql(js: string): string {
+// Janky SQL to JS conversion.
+function jsToSql(js: string, scope: Scope<unknown>): string {
+  // Use CodeMirror's Javascript parser to iterate over the expression.
+  // TODO: can we share this object?
+  const { language } = javascript();
+  const parser = language.parser;
+  const ast = parser.parse(js);
+
+  const replacements: Array<{ from: number; to: number; value: string }> = [];
+  let ignore: { type: string; from: number; to: number } | undefined;
+  type SyntaxNode = typeof ast.topNode;
+
+  function getStringConcatOperator(node: SyntaxNode) {
+    if (node.type.name !== "BinaryExpression") {
+      return false;
+    }
+
+    const op = node.getChild("ArithOp");
+    if (!op) {
+      return false;
+    }
+
+    const opText = js.slice(op.from, op.to);
+    if (opText !== "+") {
+      return false;
+    }
+
+    const string = node.getChild("String");
+    const left = node.firstChild;
+    const right = node.lastChild;
+    if (
+      string ||
+      (left && getStringConcatOperator(left)) ||
+      (right && getStringConcatOperator(right))
+    ) {
+      return op;
+    }
+
+    return false;
+  }
+
+  ast.iterate({
+    enter(type, from, to, get) {
+      type NodeType = typeof type;
+      const replace = (
+        value: string,
+        node?: { type: NodeType; from: number; to: number },
+      ) => {
+        const target = node ?? { type, from, to };
+        replacements.push({
+          from: target.from,
+          to: target.to,
+          value,
+        });
+        if (!node) {
+          ignore = {
+            type: target.type?.name,
+            from: target.from,
+            to: target.to,
+          };
+        }
+      };
+
+      if (ignore) {
+        return;
+      }
+
+      const text = js.slice(from, to);
+
+      // Replace id variables with column names,
+      // and inline other bindings / expressions
+      if (type.name === "VariableName") {
+        const resolved = scope.resolve(text, "column");
+        replace(sqlToString(resolved));
+        return;
+      }
+
+      // Math.sqrt(x) -> sqrt(x)
+      // https://www.sqlite.org/lang_mathfunc.html
+      if (type.name === "MemberExpression" && text.startsWith("Math.")) {
+        const [, funcName] = text.split(".");
+        replace(funcName);
+        return;
+      }
+
+      // "foo" + "bar" -> "foo" || "bar"
+      // Replace obvious Javascript string math w/ SQLite's concat operator
+      if (type.name === "BinaryExpression") {
+        const operator = getStringConcatOperator(get());
+        if (operator) {
+          replace(`||`, operator);
+        }
+      }
+    },
+    leave(type, from, to) {
+      if (
+        ignore &&
+        ignore.type === type.name &&
+        ignore.from === from &&
+        ignore.to === to
+      ) {
+        ignore = undefined;
+      }
+    },
+  });
   let result = js;
-  result = result.replaceAll("+", "||");
-  result = result.replaceAll(
-    dottedPath,
-    (match) => match.split(".").at(-1) || match,
-  );
+  replacements.sort((a, b) => b.from - a.from);
+  for (const { from, to, value } of replacements) {
+    result = result.slice(0, from) + value + result.slice(to);
+  }
+  // result = result.replaceAll("+", "||");
+
+  // for (const id of scope.all()) {
+  //   console.warn(`try replace id '${id}' in js '${result}'`);
+  //   result = result.replaceAll(
+  //     new RegExp(`\\b${id}\\b`, "g"),
+  //     (match, ...args) => {
+  //       console.log("match id", id, "with", match, "and args", args);
+  //       const replacement = sqlToString(scope.resolve(id, "column"));
+  //       console.log(
+  //         `do replace id ${id}(${match}) in js ${js} -> ${replacement}`,
+  //       );
+  //       return replacement;
+  //     },
+  //   );
+  // }
   return result;
 }
 
@@ -495,6 +620,8 @@ class Scope<K> {
   children = new Map<K, Scope<K>>();
   uniqueTableNames = new Namer<Fact>();
 
+  valueToSql = (value: Value): Sql => valueToSqlWithScope(value, this);
+
   bind(id: string, binding: Value | TableColumn) {
     if (this.has(id)) {
       throw new Error(`Duplicate binding for ${id}`);
@@ -512,6 +639,7 @@ class Scope<K> {
     const scope = this.scope(id);
     if (!scope) {
       // throw new Error(`No binding for ${id} in any scope`);
+      console.trace("not bound", id);
       return todo(`Not bound in any scope: ${id}`, raw(`unbound_id_${id}`));
     }
     const binding = scope.bindings.get(id);
@@ -528,10 +656,10 @@ class Scope<K> {
         Id: (node) => {
           return this.resolve(node.Id, term);
         },
-        Literal: valueToSql,
-        Expr: valueToSql,
-        Aggregate(node) {
-          return todo(`Id bound to aggregate: ${id}`, valueToSql(node));
+        Literal: this.valueToSql,
+        Expr: this.valueToSql,
+        Aggregate: (node) => {
+          return todo(`Id bound to aggregate: ${id}`, this.valueToSql(node));
         },
       }),
     );
@@ -558,6 +686,10 @@ class Scope<K> {
 
   has(id: string): boolean {
     return Boolean(this.bindings.has(id) || this.parent?.has(id));
+  }
+
+  all(): Set<string> {
+    return new Set([...this.bindings.keys(), ...(this.parent?.all() ?? [])]);
   }
 
   childScope(key: K): Scope<K> {
@@ -669,9 +801,9 @@ class SqlCompiler {
                   projected.add(node.Id);
                   return currentScope.resolve(node.Id, "column");
                 },
-                Literal: valueToSql,
-                Expr: valueToSql,
-                Aggregate: valueToSql,
+                Literal: currentScope.valueToSql,
+                Expr: currentScope.valueToSql,
+                Aggregate: currentScope.valueToSql,
               }),
             ),
             as: column,
@@ -714,7 +846,11 @@ class SqlCompiler {
               for (const [column, value] of Object.entries(props)) {
                 const addEqConstraint = (node: Value) => {
                   where.terms.push(
-                    op(raw(`${uniqueName}.${column}`), "=", valueToSql(node)),
+                    op(
+                      raw(`${uniqueName}.${column}`),
+                      "=",
+                      currentScope.valueToSql(node),
+                    ),
                   );
                 };
                 matchNode(value, {
@@ -734,7 +870,7 @@ class SqlCompiler {
               }
             },
             Expr(expr) {
-              where.terms.push(valueToSql(expr));
+              where.terms.push(currentScope.valueToSql(expr));
             },
             Binding({ Binding }) {
               // Handled elsewhere.
