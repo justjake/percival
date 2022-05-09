@@ -24,8 +24,11 @@ async function withTemporaryDB<T>(
 ): Promise<T> {
   SQLite ??= await initSqlJs({
     locateFile: () => {
+      const origin = import.meta.env.VITE_VERCEL_URL
+        ? `https://${import.meta.env.VITE_VERCEL_URL}`
+        : undefined;
       try {
-        return new URL(sqlJsWasm, String(import.meta.env.VITE_VERCEL_URL)).href;
+        return new URL(sqlJsWasm, origin).href;
       } catch (error) {
         return sqlJsWasm;
       }

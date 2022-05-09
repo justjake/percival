@@ -30,4 +30,5 @@ else
   curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 fi
 
+export CARGO_TARGET_DIR="$PWD/node_modules/.cargo-target"
 ./build-percival-wasm-with-typescript-types.sh
