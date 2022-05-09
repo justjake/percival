@@ -11,6 +11,7 @@ import initSqlJs, {
   type Database,
   type QueryExecResult,
   type Statement,
+  type SqlValue,
 } from "sql.js";
 import sqlJsWasm from "sql.js/dist/sql-wasm.wasm?url";
 import { Relation, type RelationSet, type Row } from "./types";
@@ -120,6 +121,10 @@ export function debugExec(
     const sqlString = program.toString();
 
     try {
+      for (const exprFunction of compiler.compiledExpressions.values()) {
+        db.create_function(exprFunction.sqlName, exprFunction.fn as any);
+      }
+
       const execResult = db.exec(sqlString);
       for (
         let statementIndex = 0;
@@ -187,6 +192,11 @@ interface SqlTypes {
   tableAlias: {
     expr: Sql;
     as: string;
+  };
+
+  call: {
+    callee: Sql;
+    args: Sql[];
   };
 }
 
@@ -280,6 +290,10 @@ export function sqlToString(sql: Sql | string): string {
       return `${sql.name}(${sql.columnNames.join(", ")}) AS (${sqlToString(
         sql.as,
       )})`;
+    case "call":
+      return `${sqlToString(sql.callee)}(${sql.args
+        .map(sqlToString)
+        .join(", ")})`;
     case "list":
       return sql.terms.map(sqlToString).join(sql.separator ?? "\n");
     case "values":
@@ -307,48 +321,18 @@ export function sqlToString(sql: Sql | string): string {
   }
 }
 
-function valueToSqlWithScope(value: Value, scope: Scope<unknown>): Sql {
-  if ("Id" in value) {
-    return raw(value.Id);
-  }
-
-  if ("Literal" in value) {
-    if ("Number" in value.Literal) {
-      return raw(String(value.Literal.Number));
-    }
-
-    if ("String" in value.Literal) {
-      // TODO: quoting
-      const quoted = value.Literal.String.replace(/'/g, "''");
-      return todo(`Correct quote escaping`, raw(`'${quoted}'`));
-    }
-
-    if ("Boolean" in value.Literal) {
-      return value.Literal.Boolean ? raw("1") : raw("0");
-    }
-
-    unreachable(value.Literal);
-  }
-
-  if ("Expr" in value) {
-    return raw(`(${jsToSql(value.Expr, scope)})`);
-  }
-
-  if ("Aggregate" in value) {
-    // TODO: aggregate
-    return todo(`AGGREGATE ${JSON.stringify(value.Aggregate)}`, raw(`0`));
-  }
-
-  unreachable(value);
-}
-
-// Janky SQL to JS conversion.
-function jsToSql(js: string, scope: Scope<unknown>): string {
+function parseJs(js: string) {
   // Use CodeMirror's Javascript parser to iterate over the expression.
   // TODO: can we share this object?
   const { language } = javascript();
   const parser = language.parser;
   const ast = parser.parse(js);
+  return ast;
+}
+
+// Janky SQL to JS conversion.
+function jsToSql(js: string, scope: Scope<unknown>): string {
+  const ast = parseJs(js);
 
   const replacements: Array<{ from: number; to: number; value: string }> = [];
   let ignore: { type: string; from: number; to: number } | undefined;
@@ -418,7 +402,7 @@ function jsToSql(js: string, scope: Scope<unknown>): string {
 
       // Replace id variables with column names,
       // and inline other bindings / expressions
-      if (type.name === "VariableName") {
+      if (type.name === "VariableName" && scope.has(text)) {
         const resolved = scope.resolve(text, "column");
         replace(sqlToString(resolved));
         return;
@@ -674,13 +658,16 @@ class Namer<K> {
 
 type TableColumn = `${string}.${string}`;
 class Scope<K> {
-  constructor(public parent: Scope<unknown> | undefined) {}
+  constructor(
+    public parent: Scope<unknown> | undefined,
+    public compiler: SqlCompiler,
+  ) {}
   bindings = new Map<string, Value | TableColumn>();
   relatedColumns = new DAG<string, TableColumn>();
   children = new Map<K, Scope<K>>();
   uniqueTableNames = new Namer<Fact>();
 
-  valueToSql = (value: Value): Sql => valueToSqlWithScope(value, this);
+  valueToSql = (value: Value): Sql => this.compiler.compileValue(value, this);
 
   bind(id: string, binding: Value | TableColumn) {
     if (this.has(id)) {
@@ -753,7 +740,7 @@ class Scope<K> {
   }
 
   childScope(key: K): Scope<K> {
-    const child = this.children.get(key) || new Scope(this);
+    const child = this.children.get(key) || new Scope(this, this.compiler);
     this.children.set(key, child);
     return child;
   }
@@ -766,14 +753,109 @@ class Scope<K> {
 class SqlCompiler {
   constructor(public readonly program: Program) {}
 
+  public compiledExpressions = new Map<
+    string,
+    {
+      fn: Function;
+      sqlName: string;
+      sql: Sql;
+    }
+  >();
+
   sql(): string {
     const comp = this.compile();
     return comp.toString();
   }
 
+  compileValue(value: Value, scope: Scope<unknown>): Sql {
+    if ("Id" in value) {
+      return raw(value.Id);
+    }
+
+    if ("Literal" in value) {
+      if ("Number" in value.Literal) {
+        return raw(String(value.Literal.Number));
+      }
+
+      if ("String" in value.Literal) {
+        // TODO: quoting
+        const quoted = value.Literal.String.replace(/'/g, "''");
+        return todo(`Correct quote escaping`, raw(`'${quoted}'`));
+      }
+
+      if ("Boolean" in value.Literal) {
+        return value.Literal.Boolean ? raw("1") : raw("0");
+      }
+
+      unreachable(value.Literal);
+    }
+
+    if ("Expr" in value) {
+      return this.compileExpression(value.Expr, scope);
+    }
+
+    if ("Aggregate" in value) {
+      // TODO: aggregate
+      return todo(`AGGREGATE ${JSON.stringify(value.Aggregate)}`, raw(`0`));
+    }
+
+    unreachable(value);
+  }
+
+  compileExpression(expr: string, scope: Scope<unknown>): Sql {
+    if (this.compiledExpressions.has(expr)) {
+      const compiled = must("have expr", this.compiledExpressions.get(expr));
+      return compiled.sql;
+    }
+
+    const sqlFunctionName = `expr${this.compiledExpressions.size}_${expr
+      .replaceAll(/[^\w]/g, "")
+      .slice(0, 15)}`;
+    const ids = new Set<string>();
+    const ast = parseJs(expr);
+    ast.iterate({
+      enter: (type, from, to) => {
+        const text = expr.slice(from, to);
+        if (type.name === "VariableName" && scope.has(text) && !ids.has(text)) {
+          ids.add(text);
+        }
+      },
+    });
+    const jsParams = Array.from(ids);
+    const sqlParams = jsParams.map((id) => scope.resolve(id, "column"));
+    const expressionFunction = new Function(...jsParams, `return ${expr}`);
+    const wrapperFunction = (...args: unknown[]) => {
+      const result = expressionFunction(...args);
+      if (result === null) {
+        return result;
+      }
+      if (typeof result === "object") {
+        if (result instanceof Date) {
+          return result.toISOString();
+        }
+        return String(result);
+      }
+      return result;
+    };
+    Object.defineProperty(wrapperFunction, "length", {
+      value: jsParams.length,
+    });
+    const sql: Sql<"call"> = {
+      type: "call",
+      callee: raw(sqlFunctionName),
+      args: sqlParams,
+    };
+    this.compiledExpressions.set(expr, {
+      fn: wrapperFunction,
+      sql,
+      sqlName: sqlFunctionName,
+    });
+    return sql;
+  }
+
   compile() {
     const goals = new Map<string, Sql<"binding">>();
-    const rootScope = new Scope<Rule>(undefined);
+    const rootScope = new Scope<Rule>(undefined, this);
 
     {
       let currentScope = rootScope;
@@ -816,6 +898,13 @@ class SqlCompiler {
                   currentScope.bind(id, value);
                 },
               });
+            }
+          },
+          Expr: (expr) => {
+            // Compile the expression to JS.
+            const source = expr.Expr;
+            if (this.compiledExpressions.has(source)) {
+              return;
             }
           },
         },
