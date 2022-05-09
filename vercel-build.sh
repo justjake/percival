@@ -2,6 +2,14 @@
 
 set -eo pipefail
 
+# Do some funny stuff
+mkdir -p node_modules/.cargo
+if [[ -e "$HOME/.cargo/env" ]] ; then
+  source "$HOME/.cargo/env"
+else
+  ln "$HOME/.cargo" node_modules/.cargo
+fi
+
 if rustup -V ; then
   echo "Rust already installed"
 else
