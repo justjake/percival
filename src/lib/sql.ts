@@ -1108,7 +1108,7 @@ function getImportUrl(url: string) {
     case "http://":
     case "https://":
       return url;
-    case "hg://":
+    case "gh://":
       return `https://cdn.jsdelivr.net/gh/${address}`;
     case "npm://":
       return `https://cdn.jsdelivr.net/npm/${address}`;
