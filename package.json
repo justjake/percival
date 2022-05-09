@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "./build-percival-wasm-with-typescript-types.sh && vite build",
+    "build": "./vercel-build.sh && vite build",
     "serve": "vite preview",
     "test": "mocha-vite-puppeteer",
     "check": "svelte-check --tsconfig ./tsconfig.json",
