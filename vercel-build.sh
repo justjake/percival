@@ -5,10 +5,10 @@ set -x
 
 # Do some funny stuff
 mkdir -p node_modules/.cargo
+ln -s node_modules/.cargo "$HOME/.cargo"
+
 if [[ -e "$HOME/.cargo/env" ]] ; then
   source "$HOME/.cargo/env"
-else
-  ln -s node_modules/.cargo "$HOME/.cargo"
 fi
 
 if rustup -V ; then
