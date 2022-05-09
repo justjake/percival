@@ -6,8 +6,11 @@ set -x
 # Do some funny stuff
 mkdir -p node_modules/.cargo
 ln -s node_modules/.cargo "$HOME/.cargo"
+ls -la /vercel/.cargo || true
+ls -la node_modules/.cargo || true
 
 if [[ -e "$HOME/.cargo/env" ]] ; then
+  echo "Have .cargo/env file!"
   source "$HOME/.cargo/env"
 fi
 
