@@ -9,7 +9,6 @@ import FullView from "./FullView.svelte";
   let expandAll = false;
   $: level = expandAll ? 10 : 0;
   $: sql = (state.type === "code" && state.displayDebug && state.result.ok && state.result.ast !== undefined) ? compileToSql(state.result.ast) : undefined;
-  $: sqlResult = debugExec(sql)
 </script>
 
 {#if state.type === "code" && state.displayDebug && state.result.ok && state.result.ast !== undefined}

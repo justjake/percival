@@ -71,9 +71,10 @@ function initialize(js: string, ast?: Program) {
   const fn = new AsyncFunction("__percival_deps", "__percival", js);
   evaluate = async (deps: RelationSet) => {
     const js: RelationSet = await fn(deps, { Immutable, load, aggregates });
+    // const js: RelationSet = {};
     // need to async import this or we miss messages :scream:
     const { compileToSql, debugExec } = await import("./sql");
-    const sql = ast ? debugExec(compileToSql(ast)) : {};
+    const sql = ast ? await debugExec(compileToSql(ast), deps ?? {}, load) : {};
     return {
       js,
       sql,

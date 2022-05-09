@@ -7,45 +7,83 @@ import type { Rule } from "@/../crates/percival-wasm/pkg/ast/Rule";
 import type { Program } from "percival-wasm/ast/Program";
 import type { Value } from "percival-wasm/ast/Value";
 import { format as formatSql } from "sql-formatter";
-import initSqlJs from "sql.js";
+import initSqlJs, {
+  type Database,
+  type QueryExecResult,
+  type Statement,
+} from "sql.js";
 import sqlJsWasm from "sql.js/dist/sql-wasm.wasm?url";
-import { Relation, type RelationSet } from "./types";
+import { Relation, type RelationSet, type Row } from "./types";
 import { javascript } from "@codemirror/lang-javascript";
 
 const SQLite = await initSqlJs({
   locateFile: () => sqlJsWasm,
 });
 
-const DefaultDB = new SQLite.Database();
-
-function parseJs(js: string) {
-  const { language } = javascript();
-  const parser = language.parser;
-  return parser.parse(js);
+async function withTemporaryDB<T>(
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  const db = new SQLite.Database();
+  try {
+    return await fn(db);
+  } finally {
+    db.close();
+  }
 }
 
-export function debugExec(compiler: SqlCompiler | undefined): RelationSet {
+export function debugExec(
+  compiler: SqlCompiler | undefined,
+  inputs: RelationSet,
+  load: (url: string) => Promise<Relation>,
+): Promise<RelationSet> {
   if (compiler === undefined) {
-    return {
+    return Promise.resolve({
       [`sqlite.warning`]: Relation([{ message: "No SQL" }]),
-    };
+    });
   }
 
-  const program = compiler.compile();
-  const sqlString = program.toString();
+  if (inputs === undefined) {
+    throw new Error(`inputs must be defined`);
+  }
 
-  try {
-    const execResult = DefaultDB.exec(sqlString);
-    const result: RelationSet = {};
-    for (
-      let statementIndex = 0;
-      statementIndex < execResult.length;
-      statementIndex++
-    ) {
-      const statementResult = execResult[statementIndex];
+  return withTemporaryDB(async (db) => {
+    function run(sql: string, arg?: any) {
+      // console.log("SQL", sql, arg);
+      return db.run(sql, arg);
+    }
+
+    function insertData(tableName: string, data: Relation) {
+      const example = data[0];
+      const columnNames = Object.keys(example);
+      const closers: Statement[] = [];
+      try {
+        run("BEGIN");
+        run(
+          `CREATE TABLE ${tableName} (${columnNames
+            .map((name) => `${name} BLOB`)
+            .join(", ")})`,
+        );
+        const statement = db.prepare(
+          `INSERT INTO ${tableName} VALUES (${columnNames
+            .map(() => "?")
+            .join(",")})`,
+        );
+        closers.push(statement);
+        for (const row of data) {
+          statement.run(columnNames.map((x) => row[x] as any));
+        }
+      } catch (error) {
+        run("ROLLBACK");
+        throw error;
+      } finally {
+        closers.forEach((x) => x.free());
+        run("COMMIT");
+      }
+    }
+
+    function readRelation(statementResult: QueryExecResult): Relation {
       const indexToColumn = statementResult.columns;
-      const objs = new Array(statementResult.values.length);
-      result[`sqlite.${program.outputs[statementIndex]}`] = objs;
+      const objs = Relation(new Array(statementResult.values.length));
       for (
         let rowIndex = 0;
         rowIndex < statementResult.values.length;
@@ -53,22 +91,56 @@ export function debugExec(compiler: SqlCompiler | undefined): RelationSet {
       ) {
         const row = statementResult.values[rowIndex];
         const obj: Record<string, unknown> = {};
-        objs[rowIndex] = obj;
+        objs[rowIndex] = obj as Row;
         for (let colIndex = 0; colIndex < row.length; colIndex++) {
           obj[indexToColumn[colIndex]] = row[colIndex];
         }
       }
+      return objs;
     }
-    return result;
-  } catch (error: any) {
-    return {
-      [`sqlite.error`]: Relation([
-        {
-          message: error.message,
-        },
-      ]),
-    };
-  }
+
+    const result: RelationSet = {};
+
+    // Insert all dependencies
+    console.log("Inserting dependencies", inputs);
+    for (const [name, data] of Object.entries(inputs)) {
+      insertData(name, data);
+    }
+
+    // Fetch and insert all imports
+    for (const import_ of compiler.program.imports) {
+      const data = await load(getImportUrl(import_.uri));
+      insertData(import_.name, data);
+      // get it back out
+      const [rows] = db.exec(`SELECT * FROM ${import_.name}`);
+      result[`sqlite.${import_.name}`] = readRelation(rows);
+    }
+
+    const program = compiler.compile();
+    const sqlString = program.toString();
+
+    try {
+      const execResult = db.exec(sqlString);
+      for (
+        let statementIndex = 0;
+        statementIndex < execResult.length;
+        statementIndex++
+      ) {
+        const statementResult = execResult[statementIndex];
+        result[`sqlite.${program.outputs[statementIndex]}`] =
+          readRelation(statementResult);
+      }
+      return result;
+    } catch (error: any) {
+      return {
+        [`sqlite.error`]: Relation([
+          {
+            message: error.message,
+          },
+        ]),
+      };
+    }
+  });
 }
 
 interface SqlTypes {
@@ -270,8 +342,6 @@ function valueToSqlWithScope(value: Value, scope: Scope<unknown>): Sql {
   unreachable(value);
 }
 
-const mathFunction = /^Math\.\w*/g;
-
 // Janky SQL to JS conversion.
 function jsToSql(js: string, scope: Scope<unknown>): string {
   // Use CodeMirror's Javascript parser to iterate over the expression.
@@ -284,6 +354,7 @@ function jsToSql(js: string, scope: Scope<unknown>): string {
   let ignore: { type: string; from: number; to: number } | undefined;
   type SyntaxNode = typeof ast.topNode;
 
+  // Used for replacing `+` with `||` concatenation.
   function getStringConcatOperator(node: SyntaxNode) {
     if (node.type.name !== "BinaryExpression") {
       return false;
@@ -313,6 +384,10 @@ function jsToSql(js: string, scope: Scope<unknown>): string {
     return false;
   }
 
+  // TODO: as an alternative to mangling the AST, we could instead create a custom function
+  // that takes all variables as arguments, and replace the entire expression with such
+  // a function call.
+  // https://sql.js.org/documentation/Database.html#%255B%2522create_function%2522%255D
   ast.iterate({
     enter(type, from, to, get) {
       type NodeType = typeof type;
@@ -377,27 +452,12 @@ function jsToSql(js: string, scope: Scope<unknown>): string {
       }
     },
   });
+
   let result = js;
   replacements.sort((a, b) => b.from - a.from);
   for (const { from, to, value } of replacements) {
     result = result.slice(0, from) + value + result.slice(to);
   }
-  // result = result.replaceAll("+", "||");
-
-  // for (const id of scope.all()) {
-  //   console.warn(`try replace id '${id}' in js '${result}'`);
-  //   result = result.replaceAll(
-  //     new RegExp(`\\b${id}\\b`, "g"),
-  //     (match, ...args) => {
-  //       console.log("match id", id, "with", match, "and args", args);
-  //       const replacement = sqlToString(scope.resolve(id, "column"));
-  //       console.log(
-  //         `do replace id ${id}(${match}) in js ${js} -> ${replacement}`,
-  //       );
-  //       return replacement;
-  //     },
-  //   );
-  // }
   return result;
 }
 
@@ -639,7 +699,7 @@ class Scope<K> {
     const scope = this.scope(id);
     if (!scope) {
       // throw new Error(`No binding for ${id} in any scope`);
-      console.trace("not bound", id);
+      console.warn(`No binding for ${id} in any scope:`, id);
       return todo(`Not bound in any scope: ${id}`, raw(`unbound_id_${id}`));
     }
     const binding = scope.bindings.get(id);
@@ -906,7 +966,7 @@ class SqlCompiler {
             type: "with",
             bindings: Array.from(goals.values()),
           },
-          raw(`SELECT * FROM ${goalName}`),
+          raw(`SELECT DISTINCT * FROM ${goalName}`),
         ],
       });
     }
@@ -918,4 +978,24 @@ class SqlCompiler {
 export function compileToSql(program: Program) {
   const compiler = new SqlCompiler(program);
   return compiler;
+}
+
+function getImportUrl(url: string) {
+  const index = url.indexOf("://");
+  if (index === -1) {
+    throw new Error(`Unknown URL protocol: ${url}`);
+  }
+  const protocol = url.slice(0, index + 3);
+  const address = url.slice(index + 3);
+  switch (protocol) {
+    case "http://":
+    case "https://":
+      return url;
+    case "hg://":
+      return `https://cdn.jsdelivr.net/gh/${address}`;
+    case "npm://":
+      return `https://cdn.jsdelivr.net/npm/${address}`;
+    default:
+      throw new Error(`Unknown URL protocol: ${url}`);
+  }
 }
