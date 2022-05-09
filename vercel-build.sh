@@ -8,7 +8,7 @@ mkdir -p node_modules/.cargo
 if [[ -e "$HOME/.cargo/env" ]] ; then
   source "$HOME/.cargo/env"
 else
-  ln node_modules/.cargo "$HOME/.cargo"
+  ln -s node_modules/.cargo "$HOME/.cargo"
 fi
 
 if rustup -V ; then
