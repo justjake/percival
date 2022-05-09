@@ -795,8 +795,26 @@ class SqlCompiler {
     }
 
     if ("Aggregate" in value) {
+      const aggregateFunctionMap: Record<string, string> = {
+        mean: "avg",
+      };
       // TODO: aggregate
-      return todo(`AGGREGATE ${JSON.stringify(value.Aggregate)}`, raw(`0`));
+      // return todo(`AGGREGATE ${JSON.stringify(value.Aggregate)}`, raw(`0`));
+      const operator =
+        aggregateFunctionMap[value.Aggregate.operator] ??
+        value.Aggregate.operator;
+      const list: Sql<"list"> = {
+        type: "list",
+        separator: " ",
+        terms: [
+          {
+            type: "call",
+            callee: raw(operator),
+            args: [this.compileValue(value.Aggregate.value, scope)],
+          },
+        ],
+      };
+      return todo("Aggregates are a WIP", list);
     }
 
     unreachable(value);
