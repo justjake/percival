@@ -4,21 +4,24 @@ set -eo pipefail
 set -x
 
 # Do some funny stuff
-mkdir -p node_modules/.cargo
-ln -s node_modules/.cargo "$HOME/.cargo"
-ls -la /vercel/.cargo || true
-ls -la node_modules/.cargo || true
+export RUSTUP_HOME="$PWD/node_modules/.rustup"
+ls -la "$RUSTUP_HOME" || true
 
-if [[ -e "$HOME/.cargo/env" ]] ; then
+export CARGO_HOME="$PWD/node_modules/.cargo"
+ls -la "$CARGO_HOME" || true
+
+cargo_env_file="$CARGO_HOME/env"
+
+if [[ -e "$cargo_env_file" ]] ; then
   echo "Have .cargo/env file!"
-  source "$HOME/.cargo/env"
+  source "$cargo_env_file"
 fi
 
 if rustup -V ; then
   echo "Rust already installed"
 else
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-  source "$HOME/.cargo/env"
+  source "$cargo_env_file"
 fi
 
 if wasm-pack -V ; then
