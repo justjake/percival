@@ -4,6 +4,7 @@ import { Relation } from "./types";
 import type { RelationSet } from "./types";
 import type { Program } from "@/../crates/percival-wasm/pkg/ast/Program";
 import type { CodeOutput } from "./runtime";
+import { compileToSql, debugExec } from "./sql";
 
 /** Load data from an external source. */
 async function load(url: string): Promise<Relation> {
@@ -73,7 +74,6 @@ function initialize(js: string, ast?: Program) {
     const js: RelationSet = await fn(deps, { Immutable, load, aggregates });
     // const js: RelationSet = {};
     // need to async import this or we miss messages :scream:
-    const { compileToSql, debugExec } = await import("./sql");
     const sql = ast ? await debugExec(compileToSql(ast), deps ?? {}, load) : {};
     return {
       js,

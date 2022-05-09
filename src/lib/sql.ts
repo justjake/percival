@@ -11,19 +11,20 @@ import initSqlJs, {
   type Database,
   type QueryExecResult,
   type Statement,
-  type SqlValue,
+  type SqlJsStatic,
 } from "sql.js";
 import sqlJsWasm from "sql.js/dist/sql-wasm.wasm?url";
 import { Relation, type RelationSet, type Row } from "./types";
 import { javascript } from "@codemirror/lang-javascript";
 
-const SQLite = await initSqlJs({
-  locateFile: () => sqlJsWasm,
-});
+let SQLite: SqlJsStatic;
 
 async function withTemporaryDB<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
+  SQLite ??= await initSqlJs({
+    locateFile: () => sqlJsWasm,
+  });
   const db = new SQLite.Database();
   try {
     return await fn(db);
