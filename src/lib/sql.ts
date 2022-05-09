@@ -23,7 +23,7 @@ async function withTemporaryDB<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
   SQLite ??= await initSqlJs({
-    locateFile: () => sqlJsWasm,
+    locateFile: () => new URL(sqlJsWasm, import.meta.url).href,
   });
   const db = new SQLite.Database();
   try {
