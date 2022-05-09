@@ -17,8 +17,11 @@
 
 <header class="h-16 border-b flex justify-center">
   <div class="w-full max-w-screen-lg flex justify-between items-center px-3">
-    <a href="/">
+    <a href="/" class="flex flex-row justify-center items-center">
       <img src={logo} alt="Percival logo" class="h-12" />
+      <span class="font-serif">
+      with SQLite✨
+      </span>
     </a>
     <div class="nav-buttons">
       <button
