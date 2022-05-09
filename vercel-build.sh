@@ -1,13 +1,14 @@
 #!/usr/bin/bash
 
 set -eo pipefail
+set -x
 
 # Do some funny stuff
 mkdir -p node_modules/.cargo
 if [[ -e "$HOME/.cargo/env" ]] ; then
   source "$HOME/.cargo/env"
 else
-  ln "$HOME/.cargo" node_modules/.cargo
+  ln node_modules/.cargo "$HOME/.cargo"
 fi
 
 if rustup -V ; then
