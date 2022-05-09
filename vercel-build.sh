@@ -15,6 +15,4 @@ else
   curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 fi
 
-cargo install
-
 ./build-percival-wasm-with-typescript-types.sh
